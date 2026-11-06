@@ -27,6 +27,14 @@ def _bridge_volume():
     for name in BRIDGED:
         src = os.path.join(VOL, name)
         dst = os.path.join(WS, name)
+        # Create the directory on the volume first if missing: without this,
+        # the pipeline's own mkdir would create a container-local directory
+        # and its outputs (models, test images, logs) would die with the
+        # worker instead of persisting on the volume.
+        try:
+            os.makedirs(src, exist_ok=True)
+        except OSError:
+            pass
         if os.path.isdir(src) and not os.path.islink(dst) and not os.path.exists(dst):
             try:
                 os.symlink(src, dst)
@@ -58,6 +66,13 @@ def _comfy_ready():
 def handler(job):
     mode = (job.get("input") or {}).get("mode", "full")
     if mode == "probe":
+        # Give the background /start.sh time to bring ComfyUI up; report
+        # whether it ever answered, so a dead ComfyUI is visible pre-flight.
+        import time
+        waited = 0
+        while not _comfy_ready() and waited < 90:
+            time.sleep(5)
+            waited += 5
         out = subprocess.run(
             ["bash", "-c",
              "nvidia-smi -L; echo ---vol---; ls /runpod-volume; echo ---ws---; "
@@ -65,6 +80,7 @@ def handler(job):
              "cat /workspace/runpod/boot_mode.txt"],
             capture_output=True, text=True, timeout=180)
         return {"mode": "probe", "rc": out.returncode, "comfy_ready": _comfy_ready(),
+                "comfy_waited_s": waited,
                 "stdout": out.stdout[-1500:], "stderr": out.stderr[-400:]}
     p = subprocess.run(["bash", "/workspace/runpod/boot.sh"],
                        capture_output=True, text=True)
